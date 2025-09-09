@@ -1,0 +1,31 @@
+{
+  "name": "yavibetodo-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for Ya Vi Be Todo mini app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "echo 'No build step required'"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "telegraf": "^4.15.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "todo",
+    "miniapp"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
