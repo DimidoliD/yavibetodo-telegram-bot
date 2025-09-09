@@ -18,7 +18,7 @@ const userData = new Map();
 
 // Middleware
 app.use(cors({
-  origin: ['https://yavibetodo-telegram-539l.bolt.host', 'http://localhost:3000'],
+  origin: ['https://dimidolid.github.io', 'http://localhost:3000'],
   credentials: true
 }));
 app.use(express.json());
