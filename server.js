@@ -159,7 +159,32 @@ app.post('/api/user', (req, res) => {
   const { initData } = req.body;
   
   if (!initData) {
-    return res.status(400).json({ error: 'InitData не предоставлен' });
+    // Режим разработки - создаем тестового пользователя
+    const testUser = {
+      id: 12345,
+      first_name: 'Test',
+      last_name: 'User',
+      username: 'testuser'
+    };
+    
+    if (!userData.has(testUser.id)) {
+      userData.set(testUser.id, {
+        ...testUser,
+        todos: [],
+        created_at: new Date()
+      });
+    }
+
+    const user = userData.get(testUser.id);
+    return res.json({
+      user: {
+        id: user.id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        username: user.username
+      },
+      todos: user.todos || []
+    });
   }
 
   // В разработке можно пропустить проверку
