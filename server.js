@@ -13,23 +13,25 @@ const bot = new Telegraf(BOT_TOKEN);
 // URL вашего мини-апп
 const MINI_APP_URL = 'https://dimidolid.github.io/yavibetodo-frontend/';
 
-// Временное хранилище данных (в продакшене используйте базу данных)
+// Временное хранилище данных
 const userData = new Map();
-const sharedLists = new Map();
+const sharedTasks = new Map();
+const usersByUsername = new Map();
 
 // Middleware
 app.use(cors({
-  origin: ['https://dimidolid.github.io', 'http://localhost:3000'],
-  credentials: true
+  origin: '*',
+  credentials: false
 }));
 app.use(express.json());
 
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'Ya Vi Be Todo Server is running!', 
+    status: 'Ya Vi Be Todo Collaboration Server is running!', 
     users: userData.size,
-    features: ['categories', 'priorities', 'deadlines', 'subtasks', 'analytics', 'notifications', 'collaboration']
+    sharedTasks: sharedTasks.size,
+    features: ['delegation', 'notifications', 'deadlines', 'collaboration']
   });
 });
 
@@ -71,36 +73,55 @@ function getUserFromTelegramData(telegramInitData) {
 
 // Создание нового пользователя
 function createUser(telegramUser) {
-  return {
+  const user = {
     id: telegramUser.id,
     first_name: telegramUser.first_name,
     last_name: telegramUser.last_name,
     username: telegramUser.username,
     todos: [],
-    categories: [
-      { id: 1, name: 'Работа', color: '#3b82f6', icon: '💼' },
-      { id: 2, name: 'Личное', color: '#10b981', icon: '🏠' },
-      { id: 3, name: 'Учеба', color: '#f59e0b', icon: '📚' },
-      { id: 4, name: 'Здоровье', color: '#ef4444', icon: '❤️' }
-    ],
-    habits: [],
-    preferences: {
-      theme: 'auto',
-      notifications: true,
-      defaultPriority: 'medium',
-      sortBy: 'created',
-      viewMode: 'list'
+    assignedTasks: [], // Задачи назначенные этому пользователю
+    delegatedTasks: [], // Задачи которые этот пользователь назначил другим
+    contacts: [], // Список контактов для делегирования
+    notifications: {
+      enabled: true,
+      deadlineReminder: true,
+      taskAssigned: true,
+      taskCompleted: true
     },
     stats: {
       totalCompleted: 0,
-      streakDays: 0,
-      lastActivity: new Date(),
-      completedToday: 0,
-      weeklyStats: []
+      delegatedCompleted: 0,
+      onTimeCompletion: 0,
+      lateCompletion: 0
     },
-    sharedLists: [],
     created_at: new Date()
   };
+
+  // Индексируем по username для быстрого поиска
+  if (telegramUser.username) {
+    usersByUsername.set(telegramUser.username.toLowerCase(), telegramUser.id);
+  }
+
+  return user;
+}
+
+// Функция отправки уведомления пользователю
+async function sendNotification(userId, message, keyboard = null) {
+  try {
+    const options = { parse_mode: 'HTML' };
+    if (keyboard) {
+      options.reply_markup = keyboard;
+    }
+    await bot.telegram.sendMessage(userId, message, options);
+  } catch (error) {
+    console.error(`Ошибка отправки уведомления пользователю ${userId}:`, error);
+  }
+}
+
+// Функция поиска пользователя по username
+function findUserByUsername(username) {
+  const userId = usersByUsername.get(username.toLowerCase().replace('@', ''));
+  return userId ? userData.get(userId) : null;
 }
 
 // Webhook endpoint для Telegram
@@ -111,7 +132,6 @@ bot.start(async (ctx) => {
   const userId = ctx.from.id;
   const user = ctx.from;
   
-  // Сохраняем информацию о пользователе
   if (!userData.has(userId)) {
     userData.set(userId, createUser(user));
   }
@@ -126,6 +146,10 @@ bot.start(async (ctx) => {
           }
         ],
         [
+          { text: '👥 Мои задачи', callback_data: 'my_tasks' },
+          { text: '📤 Назначенные мной', callback_data: 'delegated_tasks' }
+        ],
+        [
           { text: '📊 Статистика', callback_data: 'stats' },
           { text: '⚙️ Настройки', callback_data: 'settings' }
         ]
@@ -135,21 +159,21 @@ bot.start(async (ctx) => {
 
   const welcomeMessage = `🎉 Добро пожаловать в Ya Vi Be Todo, ${user.first_name}!
 
-🚀 Ваш персональный менеджер задач с расширенными возможностями:
+🚀 Теперь с поддержкой командной работы:
 
-✅ Задачи с приоритетами и дедлайнами
-🏷️ Категории и теги  
-📊 Аналитика продуктивности
-🔔 Умные уведомления
-👥 Совместная работа
-🎯 Трекинг привычек
+✅ Создавайте и делегируйте задачи
+👥 Назначайте исполнителей
+📅 Устанавливайте дедлайны
+🔔 Получайте уведомления
+📊 Отслеживайте прогресс команды
 
-Нажмите кнопку ниже, чтобы начать!`;
+${user.username ? `Ваш @${user.username} готов для получения задач от коллег!` : '⚠️ Установите username в настройках Telegram для получения задач от других пользователей'}`;
 
   ctx.reply(welcomeMessage, keyboard);
 });
 
-bot.action('stats', async (ctx) => {
+// Обработка callback queries
+bot.action('my_tasks', async (ctx) => {
   const userId = ctx.from.id;
   const user = userData.get(userId);
   
@@ -157,32 +181,133 @@ bot.action('stats', async (ctx) => {
     ctx.answerCbQuery('Пользователь не найден');
     return;
   }
+
+  const assignedTasks = user.assignedTasks || [];
+  const pendingTasks = assignedTasks.filter(task => !task.completed);
+  const overdueTasks = pendingTasks.filter(task => 
+    task.deadline && new Date(task.deadline) < new Date()
+  );
+
+  let message = `📋 Ваши задачи:\n\n`;
   
-  const total = user.todos.length;
-  const completed = user.todos.filter(todo => todo.completed).length;
-  const pending = total - completed;
-  const completedToday = user.stats.completedToday;
-  const streak = user.stats.streakDays;
-  
-  const statsMessage = `📊 Ваша статистика:
+  if (pendingTasks.length === 0) {
+    message += '✨ Все задачи выполнены!\n';
+  } else {
+    pendingTasks.slice(0, 5).forEach((task, index) => {
+      const deadline = task.deadline ? 
+        `\n📅 До: ${new Date(task.deadline).toLocaleDateString('ru')}` : '';
+      const isOverdue = task.deadline && new Date(task.deadline) < new Date();
+      
+      message += `${index + 1}. ${isOverdue ? '🔴' : '🔵'} ${task.text}${deadline}\n`;
+      if (task.assignedBy) {
+        message += `   👤 От: ${task.assignedBy.first_name}\n`;
+      }
+      message += '\n';
+    });
 
-📝 Всего задач: ${total}
-✅ Выполнено: ${completed}
-⏳ В процессе: ${pending}
-🔥 Серия: ${streak} дней
-📅 Сегодня: ${completedToday}
-
-🎯 Прогресс: ${total > 0 ? Math.round((completed / total) * 100) : 0}%
-
-Откройте приложение для детальной аналитики!`;
-
-  ctx.editMessageText(statsMessage, {
-    reply_markup: {
-      inline_keyboard: [[
-        { text: '🔙 Назад', callback_data: 'back_to_main' }
-      ]]
+    if (pendingTasks.length > 5) {
+      message += `... и ещё ${pendingTasks.length - 5} задач\n\n`;
     }
-  });
+  }
+
+  if (overdueTasks.length > 0) {
+    message += `⚠️ Просрочено: ${overdueTasks.length} задач\n`;
+  }
+
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '📝 Открыть приложение', web_app: { url: MINI_APP_URL } }
+        ],
+        [
+          { text: '🔙 Назад', callback_data: 'back_to_main' }
+        ]
+      ]
+    }
+  };
+
+  ctx.editMessageText(message, keyboard);
+  ctx.answerCbQuery();
+});
+
+bot.action('delegated_tasks', async (ctx) => {
+  const userId = ctx.from.id;
+  const user = userData.get(userId);
+  
+  const delegatedTasks = user.delegatedTasks || [];
+  const pendingTasks = delegatedTasks.filter(task => !task.completed);
+  
+  let message = `📤 Задачи назначенные вами:\n\n`;
+  
+  if (pendingTasks.length === 0) {
+    message += 'Вы пока никому не назначали задачи.\n';
+  } else {
+    pendingTasks.slice(0, 5).forEach((task, index) => {
+      const deadline = task.deadline ? 
+        `📅 ${new Date(task.deadline).toLocaleDateString('ru')}` : '';
+      
+      message += `${index + 1}. ${task.text}\n`;
+      message += `   👤 Исполнитель: ${task.assignedTo.first_name}`;
+      if (deadline) message += `\n   ${deadline}`;
+      message += '\n\n';
+    });
+  }
+
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '📝 Открыть приложение', web_app: { url: MINI_APP_URL } }
+        ],
+        [
+          { text: '🔙 Назад', callback_data: 'back_to_main' }
+        ]
+      ]
+    }
+  };
+
+  ctx.editMessageText(message, keyboard);
+  ctx.answerCbQuery();
+});
+
+bot.action('stats', async (ctx) => {
+  const userId = ctx.from.id;
+  const user = userData.get(userId);
+  
+  const totalTasks = user.todos.length + user.assignedTasks.length;
+  const completedTasks = user.todos.filter(t => t.completed).length + 
+                        user.assignedTasks.filter(t => t.completed).length;
+  const delegatedTotal = user.delegatedTasks.length;
+  const delegatedCompleted = user.delegatedTasks.filter(t => t.completed).length;
+  
+  const message = `📊 Ваша статистика:
+
+📝 Личные задачи:
+• Всего: ${user.todos.length}
+• Выполнено: ${user.todos.filter(t => t.completed).length}
+
+👥 Назначенные вам:
+• Всего: ${user.assignedTasks.length}
+• Выполнено: ${user.assignedTasks.filter(t => t.completed).length}
+
+📤 Делегированные вами:
+• Всего: ${delegatedTotal}
+• Выполнено: ${delegatedCompleted}
+
+🎯 Общий прогресс: ${totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0}%`;
+
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🔙 Назад', callback_data: 'back_to_main' }
+        ]
+      ]
+    }
+  };
+
+  ctx.editMessageText(message, keyboard);
   ctx.answerCbQuery();
 });
 
@@ -190,26 +315,30 @@ bot.action('settings', async (ctx) => {
   const userId = ctx.from.id;
   const user = userData.get(userId);
   
-  const settingsMessage = `⚙️ Настройки:
+  const message = `⚙️ Настройки уведомлений:
 
-🎨 Тема: ${user.preferences.theme === 'auto' ? 'Авто' : user.preferences.theme === 'dark' ? 'Темная' : 'Светлая'}
-🔔 Уведомления: ${user.preferences.notifications ? 'Включены' : 'Выключены'}
-📋 Сортировка: ${user.preferences.sortBy === 'created' ? 'По дате создания' : user.preferences.sortBy === 'priority' ? 'По приоритету' : 'По дедлайну'}
+🔔 Уведомления: ${user.notifications.enabled ? 'Включены' : 'Выключены'}
+📅 Напоминания о дедлайнах: ${user.notifications.deadlineReminder ? 'Да' : 'Нет'}
+📋 Новые назначенные задачи: ${user.notifications.taskAssigned ? 'Да' : 'Нет'}
+✅ Выполнение задач: ${user.notifications.taskCompleted ? 'Да' : 'Нет'}
 
-Откройте приложение для более детальных настроек.`;
+${ctx.from.username ? `✅ Username: @${ctx.from.username}` : '⚠️ Установите username в настройках Telegram'}`;
 
-  ctx.editMessageText(settingsMessage, {
+  const keyboard = {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: user.preferences.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления', callback_data: 'toggle_notifications' }
+          { text: user.notifications.enabled ? '🔕 Выключить уведомления' : '🔔 Включить уведомления', 
+            callback_data: 'toggle_notifications' }
         ],
         [
           { text: '🔙 Назад', callback_data: 'back_to_main' }
         ]
       ]
     }
-  });
+  };
+
+  ctx.editMessageText(message, keyboard);
   ctx.answerCbQuery();
 });
 
@@ -217,15 +346,16 @@ bot.action('toggle_notifications', async (ctx) => {
   const userId = ctx.from.id;
   const user = userData.get(userId);
   
-  user.preferences.notifications = !user.preferences.notifications;
+  user.notifications.enabled = !user.notifications.enabled;
   userData.set(userId, user);
   
-  ctx.answerCbQuery(user.preferences.notifications ? 'Уведомления включены' : 'Уведомления выключены');
-  ctx.editMessageText(`✅ ${user.preferences.notifications ? 'Уведомления включены' : 'Уведомления выключены'}`, {
-    reply_markup: {
-      inline_keyboard: [[
-        { text: '🔙 Назад', callback_data: 'settings' }
-      ]]
+  ctx.answerCbQuery(user.notifications.enabled ? 'Уведомления включены' : 'Уведомления выключены');
+  
+  // Возвращаемся к настройкам
+  bot.handleUpdate({
+    callback_query: {
+      ...ctx.callbackQuery,
+      data: 'settings'
     }
   });
 });
@@ -242,6 +372,10 @@ bot.action('back_to_main', async (ctx) => {
           }
         ],
         [
+          { text: '👥 Мои задачи', callback_data: 'my_tasks' },
+          { text: '📤 Назначенные мной', callback_data: 'delegated_tasks' }
+        ],
+        [
           { text: '📊 Статистика', callback_data: 'stats' },
           { text: '⚙️ Настройки', callback_data: 'settings' }
         ]
@@ -253,14 +387,14 @@ bot.action('back_to_main', async (ctx) => {
   ctx.answerCbQuery();
 });
 
-// API endpoints для мини-апп
+// API endpoints
 
 // Получение пользователя и его данных
 app.post('/api/user', (req, res) => {
   const { initData } = req.body;
   
   if (!initData) {
-    // Режим разработки - создаем тестового пользователя
+    // Режим разработки
     const testUser = {
       id: 12345,
       first_name: 'Test',
@@ -281,14 +415,12 @@ app.post('/api/user', (req, res) => {
         username: user.username
       },
       todos: user.todos,
-      categories: user.categories,
-      habits: user.habits,
-      preferences: user.preferences,
-      stats: user.stats
+      assignedTasks: user.assignedTasks,
+      delegatedTasks: user.delegatedTasks,
+      contacts: user.contacts
     });
   }
 
-  // В разработке можно пропустить проверку
   const isValid = process.env.NODE_ENV === 'development' || verifyTelegramWebAppData(initData);
   
   if (!isValid) {
@@ -300,7 +432,6 @@ app.post('/api/user', (req, res) => {
     return res.status(400).json({ error: 'Не удалось получить данные пользователя' });
   }
 
-  // Создаем или получаем пользователя
   if (!userData.has(user.id)) {
     userData.set(user.id, createUser(user));
   }
@@ -314,16 +445,15 @@ app.post('/api/user', (req, res) => {
       username: userData_user.username
     },
     todos: userData_user.todos,
-    categories: userData_user.categories,
-    habits: userData_user.habits,
-    preferences: userData_user.preferences,
-    stats: userData_user.stats
+    assignedTasks: userData_user.assignedTasks,
+    delegatedTasks: userData_user.delegatedTasks,
+    contacts: userData_user.contacts
   });
 });
 
 // Создание новой задачи
-app.post('/api/todos', (req, res) => {
-  const { userId, text, priority = 'medium', categoryId, deadline, subtasks = [] } = req.body;
+app.post('/api/todos', async (req, res) => {
+  const { userId, text, priority = 'medium', deadline, assignedTo } = req.body;
   
   if (!userId || !text) {
     return res.status(400).json({ error: 'UserId и text обязательны' });
@@ -339,67 +469,127 @@ app.post('/api/todos', (req, res) => {
     text: text.trim(),
     completed: false,
     priority: priority,
-    categoryId: categoryId || null,
     deadline: deadline || null,
-    subtasks: subtasks.map((subtask, index) => ({
-      id: Date.now() + index,
-      text: subtask.trim(),
-      completed: false
-    })),
     createdAt: new Date().toISOString(),
     completedAt: null,
-    timeSpent: 0,
-    tags: [],
-    comments: []
+    createdBy: {
+      id: user.id,
+      first_name: user.first_name,
+      username: user.username
+    }
   };
 
-  user.todos.push(newTodo);
-  userData.set(parseInt(userId), user);
-  
+  if (assignedTo) {
+    // Задача назначается другому пользователю
+    const assignee = findUserByUsername(assignedTo);
+    if (!assignee) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    newTodo.assignedTo = {
+      id: assignee.id,
+      first_name: assignee.first_name,
+      username: assignee.username
+    };
+    newTodo.assignedBy = {
+      id: user.id,
+      first_name: user.first_name,
+      username: user.username
+    };
+
+    // Добавляем в список назначенных задач получателя
+    assignee.assignedTasks = assignee.assignedTasks || [];
+    assignee.assignedTasks.push(newTodo);
+    userData.set(assignee.id, assignee);
+
+    // Добавляем в список делегированных задач отправителя
+    user.delegatedTasks = user.delegatedTasks || [];
+    user.delegatedTasks.push(newTodo);
+    userData.set(user.id, user);
+
+    // Отправляем уведомление
+    if (assignee.notifications.enabled && assignee.notifications.taskAssigned) {
+      const deadlineText = deadline ? 
+        `\n📅 Дедлайн: ${new Date(deadline).toLocaleDateString('ru')}` : '';
+      
+      await sendNotification(
+        assignee.id,
+        `📋 <b>Новая задача от ${user.first_name}:</b>\n\n${text}${deadlineText}`,
+        {
+          inline_keyboard: [[
+            { text: '📝 Открыть приложение', web_app: { url: MINI_APP_URL } }
+          ]]
+        }
+      );
+    }
+  } else {
+    // Личная задача
+    user.todos.push(newTodo);
+    userData.set(parseInt(userId), user);
+  }
+
   res.json(newTodo);
 });
 
 // Обновление задачи
-app.put('/api/todos/:todoId', (req, res) => {
+app.put('/api/todos/:todoId', async (req, res) => {
   const { todoId } = req.params;
-  const { userId, completed, text, priority, categoryId, deadline, subtasks, timeSpent } = req.body;
+  const { userId, completed, text, priority, deadline } = req.body;
   
   const user = userData.get(parseInt(userId));
   if (!user) {
     return res.status(404).json({ error: 'Пользователь не найден' });
   }
 
-  const todoIndex = user.todos.findIndex(todo => todo.id === parseInt(todoId));
-  if (todoIndex === -1) {
+  // Ищем задачу в личных задачах или назначенных
+  let todo = user.todos.find(t => t.id === parseInt(todoId));
+  let isPersonalTask = true;
+  
+  if (!todo) {
+    todo = user.assignedTasks.find(t => t.id === parseInt(todoId));
+    isPersonalTask = false;
+  }
+
+  if (!todo) {
     return res.status(404).json({ error: 'Задача не найдена' });
   }
 
-  const todo = user.todos[todoIndex];
   const wasCompleted = todo.completed;
 
+  // Обновляем поля
   if (completed !== undefined) {
     todo.completed = completed;
     if (completed && !wasCompleted) {
       todo.completedAt = new Date().toISOString();
       user.stats.totalCompleted++;
-      user.stats.completedToday++;
+      
+      // Уведомляем назначившего о выполнении
+      if (!isPersonalTask && todo.assignedBy) {
+        const assigner = userData.get(todo.assignedBy.id);
+        if (assigner && assigner.notifications.enabled && assigner.notifications.taskCompleted) {
+          await sendNotification(
+            assigner.id,
+            `✅ <b>Задача выполнена!</b>\n\n"${todo.text}"\n\n👤 Исполнитель: ${user.first_name}`
+          );
+        }
+        
+        // Обновляем статистику назначившего
+        if (assigner) {
+          assigner.stats.delegatedCompleted++;
+          userData.set(assigner.id, assigner);
+        }
+      }
     } else if (!completed && wasCompleted) {
       todo.completedAt = null;
       user.stats.totalCompleted = Math.max(0, user.stats.totalCompleted - 1);
-      user.stats.completedToday = Math.max(0, user.stats.completedToday - 1);
     }
   }
   
   if (text !== undefined) todo.text = text.trim();
   if (priority !== undefined) todo.priority = priority;
-  if (categoryId !== undefined) todo.categoryId = categoryId;
   if (deadline !== undefined) todo.deadline = deadline;
-  if (subtasks !== undefined) todo.subtasks = subtasks;
-  if (timeSpent !== undefined) todo.timeSpent = timeSpent;
   
   todo.updatedAt = new Date().toISOString();
-  user.stats.lastActivity = new Date();
-  
   userData.set(parseInt(userId), user);
   
   res.json(todo);
@@ -415,152 +605,105 @@ app.delete('/api/todos/:todoId', (req, res) => {
     return res.status(404).json({ error: 'Пользователь не найден' });
   }
 
-  const todoIndex = user.todos.findIndex(todo => todo.id === parseInt(todoId));
-  if (todoIndex === -1) {
-    return res.status(404).json({ error: 'Задача не найдена' });
+  // Удаляем из личных задач
+  let todoIndex = user.todos.findIndex(todo => todo.id === parseInt(todoId));
+  if (todoIndex !== -1) {
+    user.todos.splice(todoIndex, 1);
+    userData.set(parseInt(userId), user);
+    return res.json({ success: true });
   }
 
-  user.todos.splice(todoIndex, 1);
-  userData.set(parseInt(userId), user);
-  
-  res.json({ success: true });
+  // Удаляем из назначенных задач
+  todoIndex = user.assignedTasks.findIndex(todo => todo.id === parseInt(todoId));
+  if (todoIndex !== -1) {
+    user.assignedTasks.splice(todoIndex, 1);
+    userData.set(parseInt(userId), user);
+    return res.json({ success: true });
+  }
+
+  res.status(404).json({ error: 'Задача не найдена' });
 });
 
-// Управление категориями
-app.post('/api/categories', (req, res) => {
-  const { userId, name, color, icon } = req.body;
+// Поиск пользователей для делегирования
+app.get('/api/users/search', (req, res) => {
+  const { query } = req.query;
   
-  const user = userData.get(parseInt(userId));
-  if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
+  if (!query || query.length < 2) {
+    return res.json([]);
   }
 
-  const newCategory = {
-    id: Date.now(),
-    name: name.trim(),
-    color: color || '#6366f1',
-    icon: icon || '📝'
-  };
-
-  user.categories.push(newCategory);
-  userData.set(parseInt(userId), user);
+  const results = [];
+  const searchQuery = query.toLowerCase().replace('@', '');
   
-  res.json(newCategory);
+  for (const [userId, user] of userData) {
+    if (user.username && user.username.toLowerCase().includes(searchQuery)) {
+      results.push({
+        id: user.id,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        username: user.username
+      });
+    }
+    
+    if (results.length >= 10) break; // Ограничиваем результаты
+  }
+  
+  res.json(results);
 });
 
-// Удаление категории
-app.delete('/api/categories/:categoryId', (req, res) => {
-  const { categoryId } = req.params;
-  const { userId } = req.body;
-  
-  const user = userData.get(parseInt(userId));
-  if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
-  }
-
-  const categoryIndex = user.categories.findIndex(cat => cat.id === parseInt(categoryId));
-  if (categoryIndex === -1) {
-    return res.status(404).json({ error: 'Категория не найдена' });
-  }
-
-  user.categories.splice(categoryIndex, 1);
-  userData.set(parseInt(userId), user);
-  
-  res.json({ success: true });
-});
-
-// Обновление категории
-app.put('/api/categories/:categoryId', (req, res) => {
-  const { categoryId } = req.params;
-  const { userId, name, color, icon } = req.body;
-  
-  const user = userData.get(parseInt(userId));
-  if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
-  }
-
-  const categoryIndex = user.categories.findIndex(cat => cat.id === parseInt(categoryId));
-  if (categoryIndex === -1) {
-    return res.status(404).json({ error: 'Категория не найдена' });
-  }
-
-  if (name !== undefined) user.categories[categoryIndex].name = name.trim();
-  if (color !== undefined) user.categories[categoryIndex].color = color;
-  if (icon !== undefined) user.categories[categoryIndex].icon = icon;
-  
-  userData.set(parseInt(userId), user);
-  
-  res.json(user.categories[categoryIndex]);
-});
-
-// Получение аналитики
-app.get('/api/analytics/:userId', (req, res) => {
+// Получение контактов пользователя
+app.get('/api/contacts/:userId', (req, res) => {
   const userId = parseInt(req.params.userId);
-  const { period = 'week' } = req.query;
-  
   const user = userData.get(userId);
+  
   if (!user) {
     return res.status(404).json({ error: 'Пользователь не найден' });
   }
+  
+  res.json(user.contacts || []);
+});
 
+// Периодическая проверка дедлайнов
+setInterval(async () => {
   const now = new Date();
-  const todos = user.todos;
-  
-  // Статистика по категориям
-  const categoryStats = user.categories.map(category => {
-    const categoryTodos = todos.filter(todo => todo.categoryId === category.id);
-    return {
-      category: category,
-      total: categoryTodos.length,
-      completed: categoryTodos.filter(todo => todo.completed).length,
-      pending: categoryTodos.filter(todo => !todo.completed).length
-    };
-  });
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(9, 0, 0, 0); // 9 утра завтра
 
-  // Статистика по приоритетам
-  const priorityStats = ['high', 'medium', 'low'].map(priority => ({
-    priority,
-    total: todos.filter(todo => todo.priority === priority).length,
-    completed: todos.filter(todo => todo.priority === priority && todo.completed).length
-  }));
+  for (const [userId, user] of userData) {
+    if (!user.notifications.enabled || !user.notifications.deadlineReminder) continue;
 
-  // Временная статистика
-  const timeStats = {
-    totalTimeSpent: todos.reduce((sum, todo) => sum + (todo.timeSpent || 0), 0),
-    avgTimePerTask: todos.length ? todos.reduce((sum, todo) => sum + (todo.timeSpent || 0), 0) / todos.length : 0,
-    completedToday: user.stats.completedToday,
-    streak: user.stats.streakDays
-  };
+    // Проверяем личные задачи
+    const personalOverdue = user.todos.filter(todo => 
+      !todo.completed && todo.deadline && 
+      new Date(todo.deadline) <= tomorrow
+    );
 
-  res.json({
-    overview: {
-      total: todos.length,
-      completed: todos.filter(todo => todo.completed).length,
-      pending: todos.filter(todo => !todo.completed).length,
-      overdue: todos.filter(todo => !todo.completed && todo.deadline && new Date(todo.deadline) < now).length
-    },
-    categoryStats,
-    priorityStats,
-    timeStats,
-    trends: user.stats.weeklyStats || []
-  });
-});
+    // Проверяем назначенные задачи
+    const assignedOverdue = user.assignedTasks.filter(todo => 
+      !todo.completed && todo.deadline && 
+      new Date(todo.deadline) <= tomorrow
+    );
 
-// Обновление настроек
-app.put('/api/preferences/:userId', (req, res) => {
-  const userId = parseInt(req.params.userId);
-  const preferences = req.body;
-  
-  const user = userData.get(userId);
-  if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
+    const allOverdue = [...personalOverdue, ...assignedOverdue];
+
+    if (allOverdue.length > 0) {
+      const message = `⏰ <b>Напоминание о дедлайнах!</b>\n\nЗадачи требующие внимания:\n\n${
+        allOverdue.slice(0, 3).map((todo, i) => {
+          const deadline = new Date(todo.deadline);
+          const isOverdue = deadline < now;
+          return `${i + 1}. ${isOverdue ? '🔴' : '🟡'} ${todo.text}\n   📅 ${deadline.toLocaleDateString('ru')}`;
+        }).join('\n\n')
+      }`;
+
+      await sendNotification(userId, message, {
+        inline_keyboard: [[
+          { text: '📝 Открыть приложение', web_app: { url: MINI_APP_URL } }
+        ]]
+      });
+    }
   }
-
-  user.preferences = { ...user.preferences, ...preferences };
-  userData.set(userId, user);
-  
-  res.json(user.preferences);
-});
+}, 60 * 60 * 1000); // Проверяем каждый час
 
 // Обработка ошибок
 bot.catch((err, ctx) => {
@@ -585,10 +728,10 @@ async function setupWebhook() {
 
 // Запуск сервера
 app.listen(PORT, async () => {
-  console.log(`🚀 Ya Vi Be Todo Server запущен на порту ${PORT}`);
+  console.log(`🚀 Ya Vi Be Todo Collaboration Server запущен на порту ${PORT}`);
   console.log(`📱 Mini App URL: ${MINI_APP_URL}`);
+  console.log(`👥 Поддержка командной работы активна`);
   
-  // Устанавливаем webhook при запуске
   if (process.env.NODE_ENV === 'production') {
     await setupWebhook();
   } else {
