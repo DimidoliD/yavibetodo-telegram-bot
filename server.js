@@ -11,10 +11,11 @@ const BOT_TOKEN = '8127780450:AAHaerKpn5LKutGijkLsRIxdFloqG4hz9Eg';
 const bot = new Telegraf(BOT_TOKEN);
 
 // URL вашего мини-апп
-const MINI_APP_URL = 'https://yavibetodo-telegram-539l.bolt.host';
+const MINI_APP_URL = 'https://dimidolid.github.io/yavibetodo-frontend/';
 
 // Временное хранилище данных (в продакшене используйте базу данных)
 const userData = new Map();
+const sharedLists = new Map();
 
 // Middleware
 app.use(cors({
@@ -25,7 +26,11 @@ app.use(express.json());
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ status: 'Bot server is running!', users: userData.size });
+  res.json({ 
+    status: 'Ya Vi Be Todo Server is running!', 
+    users: userData.size,
+    features: ['categories', 'priorities', 'deadlines', 'subtasks', 'analytics', 'notifications', 'collaboration']
+  });
 });
 
 // Функция для проверки Telegram Web App данных
@@ -64,24 +69,51 @@ function getUserFromTelegramData(telegramInitData) {
   }
 }
 
+// Создание нового пользователя
+function createUser(telegramUser) {
+  return {
+    id: telegramUser.id,
+    first_name: telegramUser.first_name,
+    last_name: telegramUser.last_name,
+    username: telegramUser.username,
+    todos: [],
+    categories: [
+      { id: 1, name: 'Работа', color: '#3b82f6', icon: '💼' },
+      { id: 2, name: 'Личное', color: '#10b981', icon: '🏠' },
+      { id: 3, name: 'Учеба', color: '#f59e0b', icon: '📚' },
+      { id: 4, name: 'Здоровье', color: '#ef4444', icon: '❤️' }
+    ],
+    habits: [],
+    preferences: {
+      theme: 'auto',
+      notifications: true,
+      defaultPriority: 'medium',
+      sortBy: 'created',
+      viewMode: 'list'
+    },
+    stats: {
+      totalCompleted: 0,
+      streakDays: 0,
+      lastActivity: new Date(),
+      completedToday: 0,
+      weeklyStats: []
+    },
+    sharedLists: [],
+    created_at: new Date()
+  };
+}
+
 // Webhook endpoint для Telegram
 app.use(bot.webhookCallback('/webhook'));
 
 // Команды бота
-bot.start((ctx) => {
+bot.start(async (ctx) => {
   const userId = ctx.from.id;
   const user = ctx.from;
   
   // Сохраняем информацию о пользователе
   if (!userData.has(userId)) {
-    userData.set(userId, {
-      id: userId,
-      first_name: user.first_name,
-      last_name: user.last_name,
-      username: user.username,
-      todos: [],
-      created_at: new Date()
-    });
+    userData.set(userId, createUser(user));
   }
 
   const keyboard = {
@@ -89,72 +121,141 @@ bot.start((ctx) => {
       inline_keyboard: [
         [
           {
-            text: '📝 Открыть Todo App',
+            text: '📝 Открыть Ya Vi Be Todo',
             web_app: { url: MINI_APP_URL }
           }
-        ]
-      ]
-    }
-  };
-
-  ctx.reply(
-    `Добро пожаловать, ${user.first_name}! 🎉\n\nВаш персональный Todo менеджер готов к работе.\nНажмите кнопку ниже, чтобы открыть приложение:`,
-    keyboard
-  );
-});
-
-bot.help((ctx) => {
-  ctx.reply(
-    'Доступные команды:\n' +
-    '/start - Запустить приложение\n' +
-    '/help - Показать эту справку\n' +
-    '/app - Открыть Todo приложение\n' +
-    '/stats - Показать статистику задач'
-  );
-});
-
-bot.command('app', (ctx) => {
-  const keyboard = {
-    reply_markup: {
-      inline_keyboard: [
+        ],
         [
-          {
-            text: '📝 Открыть Todo App',
-            web_app: { url: MINI_APP_URL }
-          }
+          { text: '📊 Статистика', callback_data: 'stats' },
+          { text: '⚙️ Настройки', callback_data: 'settings' }
         ]
       ]
     }
   };
 
-  ctx.reply('Откройте ваше Todo приложение:', keyboard);
+  const welcomeMessage = `🎉 Добро пожаловать в Ya Vi Be Todo, ${user.first_name}!
+
+🚀 Ваш персональный менеджер задач с расширенными возможностями:
+
+✅ Задачи с приоритетами и дедлайнами
+🏷️ Категории и теги  
+📊 Аналитика продуктивности
+🔔 Умные уведомления
+👥 Совместная работа
+🎯 Трекинг привычек
+
+Нажмите кнопку ниже, чтобы начать!`;
+
+  ctx.reply(welcomeMessage, keyboard);
 });
 
-bot.command('stats', (ctx) => {
+bot.action('stats', async (ctx) => {
   const userId = ctx.from.id;
   const user = userData.get(userId);
   
-  if (!user || !user.todos) {
-    ctx.reply('У вас пока нет задач. Откройте приложение, чтобы создать первую задачу!');
+  if (!user) {
+    ctx.answerCbQuery('Пользователь не найден');
     return;
   }
   
   const total = user.todos.length;
   const completed = user.todos.filter(todo => todo.completed).length;
   const pending = total - completed;
+  const completedToday = user.stats.completedToday;
+  const streak = user.stats.streakDays;
   
-  ctx.reply(
-    `📊 Ваша статистика:\n\n` +
-    `📝 Всего задач: ${total}\n` +
-    `✅ Выполнено: ${completed}\n` +
-    `⏳ В процессе: ${pending}\n` +
-    `🎯 Прогресс: ${total > 0 ? Math.round((completed / total) * 100) : 0}%`
-  );
+  const statsMessage = `📊 Ваша статистика:
+
+📝 Всего задач: ${total}
+✅ Выполнено: ${completed}
+⏳ В процессе: ${pending}
+🔥 Серия: ${streak} дней
+📅 Сегодня: ${completedToday}
+
+🎯 Прогресс: ${total > 0 ? Math.round((completed / total) * 100) : 0}%
+
+Откройте приложение для детальной аналитики!`;
+
+  ctx.editMessageText(statsMessage, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '🔙 Назад', callback_data: 'back_to_main' }
+      ]]
+    }
+  });
+  ctx.answerCbQuery();
+});
+
+bot.action('settings', async (ctx) => {
+  const userId = ctx.from.id;
+  const user = userData.get(userId);
+  
+  const settingsMessage = `⚙️ Настройки:
+
+🎨 Тема: ${user.preferences.theme === 'auto' ? 'Авто' : user.preferences.theme === 'dark' ? 'Темная' : 'Светлая'}
+🔔 Уведомления: ${user.preferences.notifications ? 'Включены' : 'Выключены'}
+📋 Сортировка: ${user.preferences.sortBy === 'created' ? 'По дате создания' : user.preferences.sortBy === 'priority' ? 'По приоритету' : 'По дедлайну'}
+
+Откройте приложение для более детальных настроек.`;
+
+  ctx.editMessageText(settingsMessage, {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: user.preferences.notifications ? '🔕 Выключить уведомления' : '🔔 Включить уведомления', callback_data: 'toggle_notifications' }
+        ],
+        [
+          { text: '🔙 Назад', callback_data: 'back_to_main' }
+        ]
+      ]
+    }
+  });
+  ctx.answerCbQuery();
+});
+
+bot.action('toggle_notifications', async (ctx) => {
+  const userId = ctx.from.id;
+  const user = userData.get(userId);
+  
+  user.preferences.notifications = !user.preferences.notifications;
+  userData.set(userId, user);
+  
+  ctx.answerCbQuery(user.preferences.notifications ? 'Уведомления включены' : 'Уведомления выключены');
+  ctx.editMessageText(`✅ ${user.preferences.notifications ? 'Уведомления включены' : 'Уведомления выключены'}`, {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '🔙 Назад', callback_data: 'settings' }
+      ]]
+    }
+  });
+});
+
+bot.action('back_to_main', async (ctx) => {
+  const user = ctx.from;
+  const keyboard = {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: '📝 Открыть Ya Vi Be Todo',
+            web_app: { url: MINI_APP_URL }
+          }
+        ],
+        [
+          { text: '📊 Статистика', callback_data: 'stats' },
+          { text: '⚙️ Настройки', callback_data: 'settings' }
+        ]
+      ]
+    }
+  };
+
+  ctx.editMessageText(`🎉 Ya Vi Be Todo - ${user.first_name}!\n\nВыберите действие:`, keyboard);
+  ctx.answerCbQuery();
 });
 
 // API endpoints для мини-апп
 
-// Получение пользователя и его задач
+// Получение пользователя и его данных
 app.post('/api/user', (req, res) => {
   const { initData } = req.body;
   
@@ -168,11 +269,7 @@ app.post('/api/user', (req, res) => {
     };
     
     if (!userData.has(testUser.id)) {
-      userData.set(testUser.id, {
-        ...testUser,
-        todos: [],
-        created_at: new Date()
-      });
+      userData.set(testUser.id, createUser(testUser));
     }
 
     const user = userData.get(testUser.id);
@@ -183,7 +280,11 @@ app.post('/api/user', (req, res) => {
         last_name: user.last_name,
         username: user.username
       },
-      todos: user.todos || []
+      todos: user.todos,
+      categories: user.categories,
+      habits: user.habits,
+      preferences: user.preferences,
+      stats: user.stats
     });
   }
 
@@ -201,11 +302,7 @@ app.post('/api/user', (req, res) => {
 
   // Создаем или получаем пользователя
   if (!userData.has(user.id)) {
-    userData.set(user.id, {
-      ...user,
-      todos: [],
-      created_at: new Date()
-    });
+    userData.set(user.id, createUser(user));
   }
 
   const userData_user = userData.get(user.id);
@@ -216,25 +313,17 @@ app.post('/api/user', (req, res) => {
       last_name: userData_user.last_name,
       username: userData_user.username
     },
-    todos: userData_user.todos || []
+    todos: userData_user.todos,
+    categories: userData_user.categories,
+    habits: userData_user.habits,
+    preferences: userData_user.preferences,
+    stats: userData_user.stats
   });
-});
-
-// Получение задач пользователя
-app.get('/api/todos/:userId', (req, res) => {
-  const userId = parseInt(req.params.userId);
-  const user = userData.get(userId);
-  
-  if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
-  }
-  
-  res.json(user.todos || []);
 });
 
 // Создание новой задачи
 app.post('/api/todos', (req, res) => {
-  const { userId, text, initData } = req.body;
+  const { userId, text, priority = 'medium', categoryId, deadline, subtasks = [] } = req.body;
   
   if (!userId || !text) {
     return res.status(400).json({ error: 'UserId и text обязательны' });
@@ -249,13 +338,21 @@ app.post('/api/todos', (req, res) => {
     id: Date.now(),
     text: text.trim(),
     completed: false,
-    createdAt: new Date().toISOString()
+    priority: priority,
+    categoryId: categoryId || null,
+    deadline: deadline || null,
+    subtasks: subtasks.map((subtask, index) => ({
+      id: Date.now() + index,
+      text: subtask.trim(),
+      completed: false
+    })),
+    createdAt: new Date().toISOString(),
+    completedAt: null,
+    timeSpent: 0,
+    tags: [],
+    comments: []
   };
 
-  if (!user.todos) {
-    user.todos = [];
-  }
-  
   user.todos.push(newTodo);
   userData.set(parseInt(userId), user);
   
@@ -265,7 +362,7 @@ app.post('/api/todos', (req, res) => {
 // Обновление задачи
 app.put('/api/todos/:todoId', (req, res) => {
   const { todoId } = req.params;
-  const { userId, completed, text } = req.body;
+  const { userId, completed, text, priority, categoryId, deadline, subtasks, timeSpent } = req.body;
   
   const user = userData.get(parseInt(userId));
   if (!user) {
@@ -277,18 +374,35 @@ app.put('/api/todos/:todoId', (req, res) => {
     return res.status(404).json({ error: 'Задача не найдена' });
   }
 
+  const todo = user.todos[todoIndex];
+  const wasCompleted = todo.completed;
+
   if (completed !== undefined) {
-    user.todos[todoIndex].completed = completed;
+    todo.completed = completed;
+    if (completed && !wasCompleted) {
+      todo.completedAt = new Date().toISOString();
+      user.stats.totalCompleted++;
+      user.stats.completedToday++;
+    } else if (!completed && wasCompleted) {
+      todo.completedAt = null;
+      user.stats.totalCompleted = Math.max(0, user.stats.totalCompleted - 1);
+      user.stats.completedToday = Math.max(0, user.stats.completedToday - 1);
+    }
   }
   
-  if (text !== undefined) {
-    user.todos[todoIndex].text = text.trim();
-  }
+  if (text !== undefined) todo.text = text.trim();
+  if (priority !== undefined) todo.priority = priority;
+  if (categoryId !== undefined) todo.categoryId = categoryId;
+  if (deadline !== undefined) todo.deadline = deadline;
+  if (subtasks !== undefined) todo.subtasks = subtasks;
+  if (timeSpent !== undefined) todo.timeSpent = timeSpent;
   
-  user.todos[todoIndex].updatedAt = new Date().toISOString();
+  todo.updatedAt = new Date().toISOString();
+  user.stats.lastActivity = new Date();
+  
   userData.set(parseInt(userId), user);
   
-  res.json(user.todos[todoIndex]);
+  res.json(todo);
 });
 
 // Удаление задачи
@@ -310,6 +424,142 @@ app.delete('/api/todos/:todoId', (req, res) => {
   userData.set(parseInt(userId), user);
   
   res.json({ success: true });
+});
+
+// Управление категориями
+app.post('/api/categories', (req, res) => {
+  const { userId, name, color, icon } = req.body;
+  
+  const user = userData.get(parseInt(userId));
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+
+  const newCategory = {
+    id: Date.now(),
+    name: name.trim(),
+    color: color || '#6366f1',
+    icon: icon || '📝'
+  };
+
+  user.categories.push(newCategory);
+  userData.set(parseInt(userId), user);
+  
+  res.json(newCategory);
+});
+
+// Удаление категории
+app.delete('/api/categories/:categoryId', (req, res) => {
+  const { categoryId } = req.params;
+  const { userId } = req.body;
+  
+  const user = userData.get(parseInt(userId));
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+
+  const categoryIndex = user.categories.findIndex(cat => cat.id === parseInt(categoryId));
+  if (categoryIndex === -1) {
+    return res.status(404).json({ error: 'Категория не найдена' });
+  }
+
+  user.categories.splice(categoryIndex, 1);
+  userData.set(parseInt(userId), user);
+  
+  res.json({ success: true });
+});
+
+// Обновление категории
+app.put('/api/categories/:categoryId', (req, res) => {
+  const { categoryId } = req.params;
+  const { userId, name, color, icon } = req.body;
+  
+  const user = userData.get(parseInt(userId));
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+
+  const categoryIndex = user.categories.findIndex(cat => cat.id === parseInt(categoryId));
+  if (categoryIndex === -1) {
+    return res.status(404).json({ error: 'Категория не найдена' });
+  }
+
+  if (name !== undefined) user.categories[categoryIndex].name = name.trim();
+  if (color !== undefined) user.categories[categoryIndex].color = color;
+  if (icon !== undefined) user.categories[categoryIndex].icon = icon;
+  
+  userData.set(parseInt(userId), user);
+  
+  res.json(user.categories[categoryIndex]);
+});
+
+// Получение аналитики
+app.get('/api/analytics/:userId', (req, res) => {
+  const userId = parseInt(req.params.userId);
+  const { period = 'week' } = req.query;
+  
+  const user = userData.get(userId);
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+
+  const now = new Date();
+  const todos = user.todos;
+  
+  // Статистика по категориям
+  const categoryStats = user.categories.map(category => {
+    const categoryTodos = todos.filter(todo => todo.categoryId === category.id);
+    return {
+      category: category,
+      total: categoryTodos.length,
+      completed: categoryTodos.filter(todo => todo.completed).length,
+      pending: categoryTodos.filter(todo => !todo.completed).length
+    };
+  });
+
+  // Статистика по приоритетам
+  const priorityStats = ['high', 'medium', 'low'].map(priority => ({
+    priority,
+    total: todos.filter(todo => todo.priority === priority).length,
+    completed: todos.filter(todo => todo.priority === priority && todo.completed).length
+  }));
+
+  // Временная статистика
+  const timeStats = {
+    totalTimeSpent: todos.reduce((sum, todo) => sum + (todo.timeSpent || 0), 0),
+    avgTimePerTask: todos.length ? todos.reduce((sum, todo) => sum + (todo.timeSpent || 0), 0) / todos.length : 0,
+    completedToday: user.stats.completedToday,
+    streak: user.stats.streakDays
+  };
+
+  res.json({
+    overview: {
+      total: todos.length,
+      completed: todos.filter(todo => todo.completed).length,
+      pending: todos.filter(todo => !todo.completed).length,
+      overdue: todos.filter(todo => !todo.completed && todo.deadline && new Date(todo.deadline) < now).length
+    },
+    categoryStats,
+    priorityStats,
+    timeStats,
+    trends: user.stats.weeklyStats || []
+  });
+});
+
+// Обновление настроек
+app.put('/api/preferences/:userId', (req, res) => {
+  const userId = parseInt(req.params.userId);
+  const preferences = req.body;
+  
+  const user = userData.get(userId);
+  if (!user) {
+    return res.status(404).json({ error: 'Пользователь не найден' });
+  }
+
+  user.preferences = { ...user.preferences, ...preferences };
+  userData.set(userId, user);
+  
+  res.json(user.preferences);
 });
 
 // Обработка ошибок
@@ -335,13 +585,14 @@ async function setupWebhook() {
 
 // Запуск сервера
 app.listen(PORT, async () => {
-  console.log(`Сервер запущен на порту ${PORT}`);
+  console.log(`🚀 Ya Vi Be Todo Server запущен на порту ${PORT}`);
+  console.log(`📱 Mini App URL: ${MINI_APP_URL}`);
   
   // Устанавливаем webhook при запуске
   if (process.env.NODE_ENV === 'production') {
     await setupWebhook();
   } else {
-    console.log('Режим разработки - используется polling');
+    console.log('🔧 Режим разработки - используется polling');
     bot.launch();
   }
 });
