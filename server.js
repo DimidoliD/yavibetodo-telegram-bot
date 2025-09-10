@@ -28,7 +28,7 @@ app.use(express.json());
 // Health check endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'Ya Vi Be Todo Collaboration Server is running!', 
+    status: 'Ya Vibe Todo Collaboration Server is running!', 
     users: userData.size,
     sharedTasks: sharedTasks.size,
     features: ['delegation', 'notifications', 'deadlines', 'collaboration']
@@ -141,7 +141,7 @@ bot.start(async (ctx) => {
       inline_keyboard: [
         [
           {
-            text: '📝 Открыть Ya Vi Be Todo',
+            text: '📝 Открыть Ya Vibe Todo',
             web_app: { url: MINI_APP_URL }
           }
         ],
@@ -157,7 +157,7 @@ bot.start(async (ctx) => {
     }
   };
 
-  const welcomeMessage = `🎉 Добро пожаловать в Ya Vi Be Todo, ${user.first_name}!
+  const welcomeMessage = `🎉 Добро пожаловать в Ya Vibe Todo, ${user.first_name}!
 
 🚀 Теперь с поддержкой командной работы:
 
@@ -367,7 +367,7 @@ bot.action('back_to_main', async (ctx) => {
       inline_keyboard: [
         [
           {
-            text: '📝 Открыть Ya Vi Be Todo',
+            text: '📝 Открыть Ya Vibe Todo',
             web_app: { url: MINI_APP_URL }
           }
         ],
@@ -383,7 +383,7 @@ bot.action('back_to_main', async (ctx) => {
     }
   };
 
-  ctx.editMessageText(`🎉 Ya Vi Be Todo - ${user.first_name}!\n\nВыберите действие:`, keyboard);
+  ctx.editMessageText(`🎉 Ya Vibe Todo - ${user.first_name}!\n\nВыберите действие:`, keyboard);
   ctx.answerCbQuery();
 });
 
@@ -728,7 +728,7 @@ async function setupWebhook() {
 
 // Запуск сервера
 app.listen(PORT, async () => {
-  console.log(`🚀 Ya Vi Be Todo Collaboration Server запущен на порту ${PORT}`);
+  console.log(`🚀 Ya Vibe Todo Collaboration Server запущен на порту ${PORT}`);
   console.log(`📱 Mini App URL: ${MINI_APP_URL}`);
   console.log(`👥 Поддержка командной работы активна`);
   
