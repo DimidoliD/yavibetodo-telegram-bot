@@ -31,7 +31,7 @@ app.get('/', (req, res) => {
     status: 'Ya Vibe Todo Collaboration Server is running!', 
     users: userData.size,
     sharedTasks: sharedTasks.size,
-    features: ['delegation', 'notifications', 'deadlines', 'collaboration']
+    features: ['delegation', 'notifications', 'deadlines', 'collaboration', 'task-status']
   });
 });
 
@@ -124,6 +124,67 @@ function findUserByUsername(username) {
   return userId ? userData.get(userId) : null;
 }
 
+// Функция синхронизации задач между пользователями
+function syncTaskBetweenUsers(taskId, updatedTask) {
+  // Обновляем задачу везде где она есть
+  for (const [userId, user] of userData) {
+    // Обновляем в личных задачах
+    const personalIndex = user.todos.findIndex(t => t.id === taskId);
+    if (personalIndex !== -1) {
+      user.todos[personalIndex] = { ...user.todos[personalIndex], ...updatedTask };
+      userData.set(userId, user);
+    }
+    
+    // Обновляем в назначенных задачах
+    const assignedIndex = user.assignedTasks.findIndex(t => t.id === taskId);
+    if (assignedIndex !== -1) {
+      user.assignedTasks[assignedIndex] = { ...user.assignedTasks[assignedIndex], ...updatedTask };
+      userData.set(userId, user);
+    }
+    
+    // Обновляем в делегированных задачах
+    const delegatedIndex = user.delegatedTasks.findIndex(t => t.id === taskId);
+    if (delegatedIndex !== -1) {
+      user.delegatedTasks[delegatedIndex] = { ...user.delegatedTasks[delegatedIndex], ...updatedTask };
+      userData.set(userId, user);
+    }
+  }
+}
+
+// Функция удаления задачи из всех мест
+function deleteTaskFromAllUsers(taskId) {
+  let deletedCount = 0;
+  
+  for (const [userId, user] of userData) {
+    // Удаляем из личных задач
+    const personalIndex = user.todos.findIndex(t => t.id === taskId);
+    if (personalIndex !== -1) {
+      user.todos.splice(personalIndex, 1);
+      deletedCount++;
+    }
+    
+    // Удаляем из назначенных задач
+    const assignedIndex = user.assignedTasks.findIndex(t => t.id === taskId);
+    if (assignedIndex !== -1) {
+      user.assignedTasks.splice(assignedIndex, 1);
+      deletedCount++;
+    }
+    
+    // Удаляем из делегированных задач
+    const delegatedIndex = user.delegatedTasks.findIndex(t => t.id === taskId);
+    if (delegatedIndex !== -1) {
+      user.delegatedTasks.splice(delegatedIndex, 1);
+      deletedCount++;
+    }
+    
+    if (personalIndex !== -1 || assignedIndex !== -1 || delegatedIndex !== -1) {
+      userData.set(userId, user);
+    }
+  }
+  
+  return deletedCount > 0;
+}
+
 // Webhook endpoint для Telegram
 app.use(bot.webhookCallback('/webhook'));
 
@@ -166,6 +227,7 @@ bot.start(async (ctx) => {
 📅 Устанавливайте дедлайны
 🔔 Получайте уведомления
 📊 Отслеживайте прогресс команды
+⚡ Управляйте статусами задач
 
 ${user.username ? `Ваш @${user.username} готов для получения задач от коллег!` : '⚠️ Установите username в настройках Telegram для получения задач от других пользователей'}`;
 
@@ -197,10 +259,14 @@ bot.action('my_tasks', async (ctx) => {
       const deadline = task.deadline ? 
         `\n📅 До: ${new Date(task.deadline).toLocaleDateString('ru')}` : '';
       const isOverdue = task.deadline && new Date(task.deadline) < new Date();
+      const status = task.status ? getStatusEmoji(task.status) : '📋';
       
-      message += `${index + 1}. ${isOverdue ? '🔴' : '🔵'} ${task.text}${deadline}\n`;
+      message += `${index + 1}. ${isOverdue ? '🔴' : status} ${task.text}${deadline}\n`;
       if (task.assignedBy) {
         message += `   👤 От: ${task.assignedBy.first_name}\n`;
+      }
+      if (task.status && task.status !== 'todo') {
+        message += `   📊 Статус: ${getStatusText(task.status)}\n`;
       }
       message += '\n';
     });
@@ -246,9 +312,10 @@ bot.action('delegated_tasks', async (ctx) => {
     pendingTasks.slice(0, 5).forEach((task, index) => {
       const deadline = task.deadline ? 
         `📅 ${new Date(task.deadline).toLocaleDateString('ru')}` : '';
+      const status = task.status ? ` (${getStatusText(task.status)})` : '';
       
       message += `${index + 1}. ${task.text}\n`;
-      message += `   👤 Исполнитель: ${task.assignedTo.first_name}`;
+      message += `   👤 Исполнитель: ${task.assignedTo.first_name}${status}`;
       if (deadline) message += `\n   ${deadline}`;
       message += '\n\n';
     });
@@ -387,6 +454,25 @@ bot.action('back_to_main', async (ctx) => {
   ctx.answerCbQuery();
 });
 
+// Функции для работы со статусами
+function getStatusEmoji(status) {
+  switch (status) {
+    case 'todo': return '📋';
+    case 'in_progress': return '⚡';
+    case 'review': return '👀';
+    default: return '📋';
+  }
+}
+
+function getStatusText(status) {
+  switch (status) {
+    case 'todo': return 'К выполнению';
+    case 'in_progress': return 'В работе';
+    case 'review': return 'На проверке';
+    default: return 'К выполнению';
+  }
+}
+
 // API endpoints
 
 // Получение пользователя и его данных
@@ -470,6 +556,7 @@ app.post('/api/todos', async (req, res) => {
     completed: false,
     priority: priority,
     deadline: deadline || null,
+    status: 'todo', // Добавляем начальный статус
     createdAt: new Date().toISOString(),
     completedAt: null,
     createdBy: {
@@ -590,38 +677,170 @@ app.put('/api/todos/:todoId', async (req, res) => {
   if (deadline !== undefined) todo.deadline = deadline;
   
   todo.updatedAt = new Date().toISOString();
-  userData.set(parseInt(userId), user);
+  
+  // Синхронизируем изменения между всеми пользователями
+  syncTaskBetweenUsers(parseInt(todoId), todo);
   
   res.json(todo);
 });
 
-// Удаление задачи
-app.delete('/api/todos/:todoId', (req, res) => {
-  const { todoId } = req.params;
-  const { userId } = req.body;
-  
-  const user = userData.get(parseInt(userId));
-  if (!user) {
-    return res.status(404).json({ error: 'Пользователь не найден' });
-  }
+// НОВЫЙ endpoint для обновления статуса задачи
+app.put('/api/todos/:todoId/status', async (req, res) => {
+  try {
+    const { todoId } = req.params;
+    const { userId, status } = req.body;
+    
+    if (!userId || !status) {
+      return res.status(400).json({ error: 'UserId и status обязательны' });
+    }
+    
+    // Проверяем валидность статуса
+    const validStatuses = ['todo', 'in_progress', 'review'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ error: 'Неверный статус' });
+    }
+    
+    const user = userData.get(parseInt(userId));
+    if (!user) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
 
-  // Удаляем из личных задач
-  let todoIndex = user.todos.findIndex(todo => todo.id === parseInt(todoId));
-  if (todoIndex !== -1) {
-    user.todos.splice(todoIndex, 1);
-    userData.set(parseInt(userId), user);
-    return res.json({ success: true });
-  }
+    // Ищем задачу среди назначенных пользователю
+    const todo = user.assignedTasks.find(t => t.id === parseInt(todoId));
+    
+    if (!todo) {
+      return res.status(404).json({ error: 'Задача не найдена' });
+    }
 
-  // Удаляем из назначенных задач
-  todoIndex = user.assignedTasks.findIndex(todo => todo.id === parseInt(todoId));
-  if (todoIndex !== -1) {
-    user.assignedTasks.splice(todoIndex, 1);
-    userData.set(parseInt(userId), user);
-    return res.json({ success: true });
+    // Обновляем статус
+    const oldStatus = todo.status;
+    todo.status = status;
+    todo.updatedAt = new Date().toISOString();
+    
+    // Синхронизируем изменения между всеми пользователями
+    syncTaskBetweenUsers(parseInt(todoId), { 
+      status: status, 
+      updatedAt: todo.updatedAt 
+    });
+    
+    // Уведомляем назначившего об изменении статуса
+    if (todo.assignedBy && oldStatus !== status) {
+      const assigner = userData.get(todo.assignedBy.id);
+      if (assigner && assigner.notifications.enabled) {
+        const statusText = getStatusText(status);
+        await sendNotification(
+          assigner.id,
+          `📊 <b>Изменен статус задачи:</b>\n\n"${todo.text}"\n\n👤 Исполнитель: ${user.first_name}\n📈 Новый статус: ${statusText}`,
+          {
+            inline_keyboard: [[
+              { text: '📝 Открыть приложение', web_app: { url: MINI_APP_URL } }
+            ]]
+          }
+        );
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      status: status,
+      message: `Статус изменен на: ${getStatusText(status)}`
+    });
+    
+  } catch (error) {
+    console.error('Ошибка обновления статуса:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера' });
   }
+});
 
-  res.status(404).json({ error: 'Задача не найдена' });
+// ИСПРАВЛЕННЫЙ endpoint удаления задачи
+app.delete('/api/todos/:todoId', async (req, res) => {
+  try {
+    const { todoId } = req.params;
+    const { userId } = req.body;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'UserId обязателен' });
+    }
+    
+    const user = userData.get(parseInt(userId));
+    if (!user) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const taskId = parseInt(todoId);
+    
+    // Ищем задачу для получения информации о назначении
+    let taskToDelete = null;
+    let taskLocation = null;
+    
+    // Проверяем личные задачи
+    const personalIndex = user.todos.findIndex(todo => todo.id === taskId);
+    if (personalIndex !== -1) {
+      taskToDelete = user.todos[personalIndex];
+      taskLocation = 'personal';
+    }
+    
+    // Проверяем назначенные задачи
+    if (!taskToDelete) {
+      const assignedIndex = user.assignedTasks.findIndex(todo => todo.id === taskId);
+      if (assignedIndex !== -1) {
+        taskToDelete = user.assignedTasks[assignedIndex];
+        taskLocation = 'assigned';
+      }
+    }
+    
+    // Проверяем делегированные задачи
+    if (!taskToDelete) {
+      const delegatedIndex = user.delegatedTasks.findIndex(todo => todo.id === taskId);
+      if (delegatedIndex !== -1) {
+        taskToDelete = user.delegatedTasks[delegatedIndex];
+        taskLocation = 'delegated';
+      }
+    }
+
+    if (!taskToDelete) {
+      return res.status(404).json({ error: 'Задача не найдена' });
+    }
+
+    // Удаляем задачу из всех мест где она может быть
+    const wasDeleted = deleteTaskFromAllUsers(taskId);
+    
+    if (!wasDeleted) {
+      return res.status(404).json({ error: 'Задача не найдена для удаления' });
+    }
+    
+    // Уведомляем связанных пользователей об удалении
+    if (taskToDelete.assignedTo && taskToDelete.assignedBy) {
+      // Если задачу удаляет назначивший
+      if (taskToDelete.assignedBy.id === parseInt(userId)) {
+        if (taskToDelete.assignedTo.id !== parseInt(userId)) {
+          await sendNotification(
+            taskToDelete.assignedTo.id,
+            `🗑️ <b>Задача отменена:</b>\n\n"${taskToDelete.text}"\n\n👤 Отменил: ${user.first_name}`
+          );
+        }
+      }
+      // Если задачу удаляет исполнитель
+      else if (taskToDelete.assignedTo.id === parseInt(userId)) {
+        if (taskToDelete.assignedBy.id !== parseInt(userId)) {
+          await sendNotification(
+            taskToDelete.assignedBy.id,
+            `🗑️ <b>Задача отклонена исполнителем:</b>\n\n"${taskToDelete.text}"\n\n👤 Отклонил: ${user.first_name}`
+          );
+        }
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Задача успешно удалена',
+      deletedTaskId: taskId
+    });
+    
+  } catch (error) {
+    console.error('Ошибка удаления задачи:', error);
+    res.status(500).json({ error: 'Внутренняя ошибка сервера при удалении задачи' });
+  }
 });
 
 // Поиск пользователей для делегирования
@@ -692,7 +911,8 @@ setInterval(async () => {
         allOverdue.slice(0, 3).map((todo, i) => {
           const deadline = new Date(todo.deadline);
           const isOverdue = deadline < now;
-          return `${i + 1}. ${isOverdue ? '🔴' : '🟡'} ${todo.text}\n   📅 ${deadline.toLocaleDateString('ru')}`;
+          const status = todo.status ? ` (${getStatusText(todo.status)})` : '';
+          return `${i + 1}. ${isOverdue ? '🔴' : '🟡'} ${todo.text}${status}\n   📅 ${deadline.toLocaleDateString('ru')}`;
         }).join('\n\n')
       }`;
 
@@ -731,6 +951,7 @@ app.listen(PORT, async () => {
   console.log(`🚀 Ya Vibe Todo Collaboration Server запущен на порту ${PORT}`);
   console.log(`📱 Mini App URL: ${MINI_APP_URL}`);
   console.log(`👥 Поддержка командной работы активна`);
+  console.log(`📊 Новые функции: статусы задач, улучшенное удаление`);
   
   if (process.env.NODE_ENV === 'production') {
     await setupWebhook();
